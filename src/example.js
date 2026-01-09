@@ -1,7 +1,7 @@
-// This file intentionally contains linting errors
+// This file intentionally exists to demonstrate ESLint passing
 
-function unusedFunction(param1, param2) {
-  console.log("This uses double quotes and will trigger linting errors")
+function usedFunction(param1) {
+  console.log('Example output:', param1);
 }
 
-unusedFunction(1);
+usedFunction(1);

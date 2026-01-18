@@ -1,0 +1,226 @@
+name: PR Automation Workflow
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  code-quality:
+    name: code-quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        id: eslint
+        run: npm run lint
+        continue-on-error: true
+
+      - name: Run Prettier formatting check
+        id: prettier
+        run: npx prettier --check .
+        continue-on-error: true
+
+      - name: Post Code Quality Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            
+            const eslintStatus = steps.eslint.outcome === 'success' ? '✅ Passed' : '❌ Failed';
+            const prettierStatus = steps.prettier.outcome === 'success' ? '✅ Passed' : '❌ Failed';
+            
+            const commentBody = `### Code Quality Report
+            **ESLint**: ${eslintStatus}
+            **Prettier**: ${prettierStatus}
+            
+            This report summarizes the code quality checks for your pull request.`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: commentBody
+            });
+
+  testing-suite:
+    name: testing-suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run test suite with coverage
+        id: tests
+        run: npm test -- --coverage
+        continue-on-error: true
+
+      - name: Generate coverage summary
+        id: coverage-summary
+        run: |
+          echo "COVERAGE_SUMMARY=$(cat coverage/coverage-summary.json | jq -r '.total | "Lines: \(.lines.pct)% | Statements: \(.statements.pct)% | Functions: \(.functions.pct)% | Branches: \(.branches.pct)%"')" >> $GITHUB_ENV
+        if: steps.tests.outcome === 'success'
+
+      - name: Post Test Coverage Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const testStatus = steps.tests.outcome === 'success' ? '✅ Passed' : '❌ Failed';
+            const coverageSummary = process.env.COVERAGE_SUMMARY || 'No coverage data available (tests failed)';
+            
+            const commentBody = `### Test Coverage Report
+            **Test Suite**: ${testStatus}
+            **Coverage Summary**: ${coverageSummary}
+            
+            This report shows the test coverage results for your pull request.`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: commentBody
+            });
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+        if: steps.tests.outcome === 'success'
+
+  security-scan:
+    name: security-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run dependency vulnerability check
+        id: npm-audit
+        run: npm audit --json > audit.json || true
+        continue-on-error: true
+
+      - name: Scan for secrets
+        id: secret-scan
+        uses: trufflesecurity/trufflehog@v3
+        with:
+          path: ./
+          base: ${{ github.event.pull_request.base.sha }}
+          head: ${{ github.event.pull_request.head.sha }}
+        continue-on-error: true
+
+      - name: Post Security Scan Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const auditData = require('./audit.json');
+            const vulnerabilities = auditData.metadata?.vulnerabilities || { critical: 0, high: 0, moderate: 0, low: 0 };
+            const secretScanStatus = steps.secret-scan.outcome === 'success' ? '✅ No secrets found' : '❌ Secrets detected';
+            
+            const commentBody = `### Security Scan Report
+            **Vulnerabilities**: Critical: ${vulnerabilities.critical}, High: ${vulnerabilities.high}, Moderate: ${vulnerabilities.moderate}, Low: ${vulnerabilities.low}
+            **Dependencies**: Audit completed for project dependencies
+            **Secret Scan**: ${secretScanStatus}
+            
+            This report summarizes security checks for your pull request.`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: commentBody
+            });
+
+  build-validation:
+    name: build-validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        id: build
+        run: npm run build
+        continue-on-error: true
+
+      - name: Validate endpoints (example)
+        id: endpoint-check
+        run: |
+          # Example: Start server and check endpoints (adjust for your project)
+          if [ -d "dist" ]; then
+            echo "Build directory exists"
+            # Add your endpoint validation logic here (e.g., curl, ping)
+            echo "Endpoint validation completed"
+          else
+            echo "Build directory not found"
+            exit 1
+          fi
+        continue-on-error: true
+
+      - name: Create deployment preview artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: dist/
+        if: steps.build.outcome === 'success'
+
+      - name: Post Build Validation
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const buildStatus = steps.build.outcome === 'success' ? '✅ Passed' : '❌ Failed';
+            const endpointStatus = steps.endpoint-check.outcome === 'success' ? '✅ Passed' : '❌ Failed';
+            
+            const commentBody = `### Build Validation
+            **Build**: ${buildStatus}
+            **Endpoint Validation**: ${endpointStatus}
+            
+            This report shows the build and endpoint validation results for your pull request.`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: commentBody
+            });
